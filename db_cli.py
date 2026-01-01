@@ -42,7 +42,7 @@ class Statement:
 @dataclass
 class CreateTableStmt(Statement):
     table_name: str
-    columns: [ColumnDef]
+    columns: List[ColumnDef]
     type: str
 
 @dataclass
@@ -143,7 +143,6 @@ class Parser:
         table_name = self.consume('ID').value
         self.consume('DELIM', '(')
         columns = []
-        print(self.consume)
         while True:
             col_name = self.consume('ID').value
             col_type = self.consume('KEYWORD').value
@@ -153,7 +152,7 @@ class Parser:
             if self.peek().value == ')': break
             self.consume('DELIM', ',')
         self.consume('DELIM', ')')
-        return CreateTableStmt(table_name, columns)
+        return CreateTableStmt(table_name=table_name, columns=columns, type="CREATE_TABLE")
 
     # --- INSERT INTO ---
     def parse_insert(self):
@@ -168,7 +167,7 @@ class Parser:
             if self.peek().value == ')': break
             self.consume('DELIM', ',')
         self.consume('DELIM', ')')
-        return InsertStmt(table_name, values)
+        return InsertStmt(table_name=table_name, values=values,type="INSERT")
 
     # --- SELECT ---
     def parse_select(self):

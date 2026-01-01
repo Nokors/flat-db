@@ -22,9 +22,6 @@ This project uses `sqlparse` for initial tokenization and a custom **Adapter Lay
 2. **Install dependencies**:
    ```bash
    pip install requirements.txt
-3. **Run**:
-   ```bash
-   pip install requirements.txt
 
 ## Run
 1. ***Successful CREATE TABLE:***
@@ -37,8 +34,8 @@ This project uses `sqlparse` for initial tokenization and a custom **Adapter Lay
 3. ***Handling Syntax Errors:***
    ```bash
    python3 db_cli.py --query "SELECT FROM users"
-# Output: Syntax Error at position 7: Expected ID, got KEYWORD
-# Near: ...SELECT FROM users...
+   # Output: Syntax Error at position 7: Expected ID, got KEYWORD
+   # Near: ...SELECT FROM users...
 
 ## Unit test
 ```bash

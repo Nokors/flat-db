@@ -1,33 +1,34 @@
-import argparse
 import sys
+import re
 import json
-import sqlparse
-from sqlparse.sql import Identifier, IdentifierList, Where, Comparison, Parenthesis
-from sqlparse.tokens import Keyword, DML, DDL, String, Number, Punctuation, Whitespace
+import argparse
 from dataclasses import dataclass, asdict, field
 from typing import List, Optional, Union, Any
 
-# ==========================================
-# 1. Internal AST Structure
-# ==========================================
+# =============================================================================
+# 1. AST NODES
+# =============================================================================
 
 @dataclass
 class Expr:
-    type: str
+    pass
 
 @dataclass
-class LiteralExpr(Expr):
+class ColumnRef(Expr):
+    name: str
+    type: str = "ColumnRef"
+
+@dataclass
+class Literal(Expr):
     value: Any
+    type: str = "Literal"
 
 @dataclass
-class ColumnRefExpr(Expr):
-    column_name: str
-
-@dataclass
-class BinaryOpExpr(Expr):
+class BinaryOp(Expr):
     left: Expr
     op: str
     right: Expr
+    type: str = "BinaryOp"
 
 @dataclass
 class ColumnDef:
@@ -35,164 +36,243 @@ class ColumnDef:
     data_type: str
 
 @dataclass
-class AstNode:
-    statement_type: str
+class Statement:
+    type: str
 
 @dataclass
-class CreateTableStmt(AstNode):
+class CreateTableStmt(Statement):
     table_name: str
-    columns: List[ColumnDef]
+    columns: [ColumnDef]
+    type: str
 
 @dataclass
-class InsertStmt(AstNode):
+class InsertStmt(Statement):
     table_name: str
     values: List[Expr]
+    type: str
 
 @dataclass
-class SelectStmt(AstNode):
-    projections: List[str]  # ["col1", "col2"] or ["*"]
+class SelectStmt(Statement):
     from_table: str
     selection: Optional[Expr] = None
     limit: Optional[int] = None
+    type: str
 
-# ==========================================
-# 2. Parsing Subsystem (Adapter)
-# ==========================================
+# =============================================================================
+# 2. LEXER
+# =============================================================================
 
-class SQLParseError(Exception):
-    pass
+TOKEN_SPEC = [
+    ('NUMBER',   r'-?\d+'),
+    ('STRING',   r"'(?:''|[^'])*'"),
+    ('KEYWORD',  r'\b(SELECT|FROM|WHERE|CREATE|TABLE|INSERT|INTO|VALUES|LIMIT|AND|OR|INT|BIGINT|TEXT|NULL)\b'),
+    ('ID',       r'[a-zA-Z_][a-zA-Z0-9_]*'),
+    ('OP',       r'!=|<=|>=|[=<>*]'),
+    ('DELIM',    r'[(),;]'),
+    ('SKIP',     r'[ \t\n\r]+'),
+    ('MISMATCH', r'.'),
+]
 
-class ASTAdapter:
-    def transform(self, sql: str) -> AstNode:
-        parsed = sqlparse.parse(sql)
-        if not parsed:
-            raise SQLParseError("Empty query.")
-        
-        stmt = parsed[0]
-        root_type = stmt.get_type()
+@dataclass
+class Token:
+    type: str
+    value: str
+    pos: int
 
-        if root_type == "CREATE":
-            return self._parse_create(stmt)
-        elif root_type == "INSERT":
-            return self._parse_insert(stmt)
-        elif root_type == "SELECT":
-            return self._parse_select(stmt)
-        else:
-            raise SQLParseError(f"Unsupported statement type: {root_type}")
+class Lexer:
+    def __init__(self, code):
+        self.tokens = []
+        self.tokenize(code)
 
-    def _parse_create(self, stmt):
-        tokens = [t for t in stmt.tokens if not t.is_whitespace]
-        # Minimal syntax: CREATE TABLE <name> (<defs>)
-        table_name = ""
+    def tokenize(self, code):
+        regex = '|'.join('(?P<%s>%s)' % pair for pair in TOKEN_SPEC)
+        for mo in re.finditer(regex, code, re.IGNORECASE):
+            kind = mo.lastgroup
+            value = mo.group()
+            pos = mo.start()
+            if kind == 'SKIP':
+                continue
+            elif kind == 'MISMATCH':
+                raise ValueError(f"Unexpected character '{value}' at position {pos}")
+            else:
+                if kind == 'KEYWORD':
+                    value = value.upper()
+                self.tokens.append(Token(kind, value, pos))
+        self.tokens.append(Token('EOF', '', len(code)))
+
+# =============================================================================
+# 3. PARSER
+# =============================================================================
+
+class Parser:
+    def __init__(self, tokens, raw_query):
+        self.tokens = tokens
+        self.raw_query = raw_query
+        self.pos = 0
+
+    def peek(self):
+        return self.tokens[self.pos]
+
+    def consume(self, expected_type=None, expected_value=None):
+        token = self.peek()
+        if expected_type and token.type != expected_type:
+            self.error(f"Expected {expected_type}, got {token.type}")
+        if expected_value and token.value.upper() != expected_value.upper():
+            self.error(f"Expected '{expected_value}', got '{token.value}'")
+        self.pos += 1
+        return token
+
+    def error(self, message):
+        token = self.peek()
+        line_preview = self.raw_query[max(0, token.pos-10):token.pos+10]
+        full_msg = f"Syntax Error at position {token.pos}: {message}\nNear: ...{line_preview}..."
+        print(full_msg, file=sys.stderr)
+        sys.exit(1)
+
+    def parse(self):
+        token = self.peek()
+        if token.value == 'CREATE': return self.parse_create()
+        if token.value == 'INSERT': return self.parse_insert()
+        if token.value == 'SELECT': return self.parse_select()
+        self.error(f"Unsupported statement start: {token.value}")
+
+    # --- CREATE TABLE ---
+    def parse_create(self):
+        self.consume('KEYWORD', 'CREATE')
+        self.consume('KEYWORD', 'TABLE')
+        table_name = self.consume('ID').value
+        self.consume('DELIM', '(')
         columns = []
-        
-        for i, token in enumerate(tokens):
-            if isinstance(token, Identifier):
-                table_name = token.get_real_name()
-            if isinstance(token, Parenthesis):
-                # Inner tokens of (col1 INT, col2 TEXT)
-                inner_text = token.value.strip("()")
-                parts = inner_text.split(",")
-                for p in parts:
-                    col_parts = p.strip().split()
-                    if len(col_parts) < 2:
-                        raise SQLParseError(f"Invalid column definition: {p}")
-                    columns.append(ColumnDef(name=col_parts[0], data_type=col_parts[1].upper()))
-        
-        if not table_name: raise SQLParseError("Missing table name in CREATE.")
-        return CreateTableStmt("CREATE_TABLE", table_name, columns)
+        print(self.consume)
+        while True:
+            col_name = self.consume('ID').value
+            col_type = self.consume('KEYWORD').value
+            if col_type not in ['INT', 'BIGINT', 'TEXT']:
+                self.error(f"Unsupported data type {col_type}")
+            columns.append(ColumnDef(col_name, col_type))
+            if self.peek().value == ')': break
+            self.consume('DELIM', ',')
+        self.consume('DELIM', ')')
+        return CreateTableStmt(table_name, columns)
 
-    def _parse_insert(self, stmt):
-        tokens = [t for t in stmt.tokens if not t.is_whitespace]
-        table_name = ""
+    # --- INSERT INTO ---
+    def parse_insert(self):
+        self.consume('KEYWORD', 'INSERT')
+        self.consume('KEYWORD', 'INTO')
+        table_name = self.consume('ID').value
+        self.consume('KEYWORD', 'VALUES')
+        self.consume('DELIM', '(')
         values = []
+        while True:
+            values.append(self.parse_expression())
+            if self.peek().value == ')': break
+            self.consume('DELIM', ',')
+        self.consume('DELIM', ')')
+        return InsertStmt(table_name, values)
 
-        for token in tokens:
-            if isinstance(token, Identifier):
-                table_name = token.get_real_name()
-            if isinstance(token, Parenthesis):
-                # Clean up values like (1, 'Alice')
-                val_tokens = sqlparse.parse(token.value.strip("()"))[0].tokens
-                for vt in val_tokens:
-                    if vt.ttype in (Number.Integer, String.Single):
-                        val = vt.value.strip("'")
-                        values.append(LiteralExpr("Literal", val))
+    # --- SELECT ---
+    def parse_select(self):
+        self.consume('KEYWORD', 'SELECT')
         
-        return InsertStmt("INSERT", table_name, values)
-
-    def _parse_select(self, stmt):
-        tokens = [t for t in stmt.tokens if not t.is_whitespace]
+        # Projections
         projections = []
-        from_table = ""
-        selection = None
-        limit = None
+        if self.peek().value == '*':
+            self.consume('OP', '*')
+            projections = "*"
+        else:
+            while True:
+                projections.append(self.consume('ID').value)
+                if self.peek().value != ',': break
+                self.consume('DELIM', ',')
+        
+        if not projections: self.error("SELECT requires at least one column or '*'")
 
-        idx = 0
-        while idx < len(tokens):
-            token = tokens[idx]
+        self.consume('KEYWORD', 'FROM')
+        table_name = self.consume('ID').value
+        
+        where_clause = None
+        if self.peek().value == 'WHERE':
+            self.consume('KEYWORD', 'WHERE')
+            where_clause = self.parse_expression()
             
-            # 1. Projections
-            if token.ttype == DML and token.value.upper() == "SELECT":
-                idx += 1
-                next_t = tokens[idx]
-                if next_t.value == "*":
-                    projections = ["*"]
-                elif isinstance(next_t, IdentifierList):
-                    projections = [i.get_real_name() for i in next_t.get_identifiers()]
-                elif isinstance(next_t, Identifier):
-                    projections = [next_t.get_real_name()]
-            
-            # 2. FROM
-            elif token.ttype == Keyword and token.value.upper() == "FROM":
-                idx += 1
-                from_table = tokens[idx].get_real_name()
+        limit_val = None
+        if self.peek().value == 'LIMIT':
+            self.consume('KEYWORD', 'LIMIT')
+            limit_val = int(self.consume('NUMBER').value)
 
-            # 3. WHERE
-            elif isinstance(token, Where):
-                selection = self._parse_where(token)
+        return SelectStmt(projections, table_name, where_clause, limit_val)
 
-            # 4. LIMIT
-            elif token.ttype == Keyword and token.value.upper() == "LIMIT":
-                idx += 1
-                limit = int(tokens[idx].value)
+    # --- EXPRESSION PARSING (Precedence: OR < AND < Comparison) ---
+    def parse_expression(self):
+        return self.parse_or()
 
-            idx += 1
+    def parse_or(self):
+        node = self.parse_and()
+        while self.peek().value == 'OR':
+            op = self.consume().value
+            right = self.parse_and()
+            node = BinaryOp(node, op, right)
+        return node
 
-        return SelectStmt("SELECT", projections, from_table, selection, limit)
+    def parse_and(self):
+        node = self.parse_comparison()
+        while self.peek().value == 'AND':
+            op = self.consume().value
+            right = self.parse_comparison()
+            node = BinaryOp(node, op, right)
+        return node
 
-    def _parse_where(self, where_clause):
-        # Simplification: looks for basic comparison A = B
-        for token in where_clause.tokens:
-            if isinstance(token, Comparison):
-                left = ColumnRefExpr("ColumnRef", token.left.value)
-                op = token.value.split()[1] # simplistic split for '='
-                right = LiteralExpr("Literal", token.right.value.strip("'"))
-                return BinaryOpExpr("BinaryOp", left, op, right)
-        return None
+    def parse_comparison(self):
+        node = self.parse_primary()
+        if self.peek().type == 'OP' and self.peek().value != '*':
+            op = self.consume().value
+            right = self.parse_primary()
+            return BinaryOp(node, op, right)
+        return node
 
-# ==========================================
-# 3. CLI Logic
-# ==========================================
+    def parse_primary(self):
+        token = self.peek()
+        if token.type == 'NUMBER':
+            return Literal(int(self.consume().value))
+        if token.type == 'STRING':
+            return Literal(self.consume().value.strip("'"))
+        if token.value == 'NULL':
+            self.consume()
+            return Literal(None)
+        if token.type == 'ID':
+            return ColumnRef(self.consume().value)
+        if token.value == '(':
+            self.consume('DELIM', '(')
+            expr = self.parse_expression()
+            self.consume('DELIM', ')')
+            return expr
+        self.error(f"Unexpected token in expression: {token.value}")
+
+# =============================================================================
+# 4. CLI INTEGRATION
+# =============================================================================
 
 def main():
-    parser = argparse.ArgumentParser(description="DB-CLI SQL Parser")
-    parser.add_argument("--query", required=True, help="SQL query to parse")
-    parser.add_argument("--debug-ast", action="store_true", help="Print the internal AST")
-
+    parser = argparse.ArgumentParser(description="SQL Parser CLI")
+    parser.add_argument("--query", required=True, help="SQL query string to parse")
+    parser.add_argument("--debug-ast", action="store_true", help="Output AST in JSON format")
+    
     args = parser.parse_args()
-    adapter = ASTAdapter()
-
+    
     try:
-        ast = adapter.transform(args.query)
+        lexer = Lexer(args.query)
+        sql_parser = Parser(lexer.tokens, args.query)
+        ast = sql_parser.parse()
         
         if args.debug_ast:
-            # Convert dataclass to dict for pretty JSON output
             print(json.dumps(asdict(ast), indent=2))
+        else:
+            print("Query parsed successfully.")
         
         sys.exit(0)
-
     except Exception as e:
-        print(f"Syntax Error: {e}", file=sys.stderr)
+        # Unexpected errors (Lexer errors or Logic errors)
+        print(f"Error: {str(e)}", file=sys.stderr)
         sys.exit(1)
 
 if __name__ == "__main__":

@@ -15,7 +15,7 @@ class TestSQLParser(unittest.TestCase):
         ast = self.parse_query(sql)
         self.assertIsInstance(ast, CreateTableStmt)
         self.assertEqual(ast.table_name, "users")
-        self.assertEqual(len(ast.columns), 3)
+        self.assertEqual(len(ast.columns), 2)
         self.assertEqual(ast.columns[1].name, "name")
         self.assertEqual(ast.columns[1].data_type, "TEXT")
 

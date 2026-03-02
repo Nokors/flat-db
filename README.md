@@ -330,22 +330,3 @@ python3 db_cli.py --execute --db-dir ./mydata \
 python3 db_cli.py --execute --db-dir ./mydata \
   --query "DROP TABLE employees"
 ```
-
----
-
-## Part 1 — SQL Parser (unchanged)
-
-The original `db_cli.py` SQL parser remains intact:
-
-- **Lexer**: regex-based tokeniser supporting `INT`, `BIGINT`, `FLOAT`, `TEXT`, `BOOL`, `NULL`
-- **Parser**: recursive-descent, handles `CREATE TABLE`, `INSERT INTO`, `SELECT … FROM … WHERE … LIMIT`
-- **AST nodes**: `CreateTableStmt`, `InsertStmt`, `SelectStmt`, `BinaryOp`, `Literal`, `ColumnRef`
-
-```bash
-# Legacy parse-only mode (no --execute flag)
-python3 db_cli.py --query "SELECT name FROM users WHERE id = 1"
-# → Query parsed successfully.
-
-python3 db_cli.py --debug-ast --query "CREATE TABLE t (x INT, y TEXT)"
-# → { "table_name": "t", "columns": [...], "type": "CREATE_TABLE" }
-```
